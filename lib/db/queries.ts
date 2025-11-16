@@ -591,3 +591,56 @@ export async function getStreamIdsByChatId({ chatId }: { chatId: string }) {
     );
   }
 }
+
+export async function searchPerfumesByEmbedding({
+  queryEmbedding,
+  limit = 5,
+}: {
+  queryEmbedding: number[];
+  limit?: number;
+}) {
+  try {
+    // Używamy raw SQL dla vector search z pgvector
+    // Formatujemy embedding jako string w formacie PostgreSQL vector
+    const embeddingString = `[${queryEmbedding.join(",")}]`;
+    
+    // Używamy sql template tag z postgres
+    const results = await client`
+      SELECT 
+        id,
+        perfume_name,
+        brand,
+        description,
+        rating,
+        rating_count,
+        notes,
+        pros,
+        cons,
+        season,
+        gender,
+        longevity,
+        sillage,
+        time_of_day,
+        value_for_money,
+        main_image_url,
+        similar_perfumes,
+        recommended_perfumes,
+        reminds_me_perfumes,
+        review,
+        metadata,
+        created_at,
+        1 - (embedding <=> ${embeddingString}::vector) as similarity
+      FROM perfumes
+      WHERE embedding IS NOT NULL
+      ORDER BY embedding <=> ${embeddingString}::vector
+      LIMIT ${limit}
+    `;
+
+    return results;
+  } catch (error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      `Failed to search perfumes: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}

@@ -171,3 +171,30 @@ export const stream = pgTable(
 );
 
 export type Stream = InferSelectModel<typeof stream>;
+
+export const perfume = pgTable("perfumes", {
+  id: text("id").primaryKey().notNull(),
+  perfumeName: text("perfume_name").notNull(),
+  brand: text("brand"),
+  description: text("description"),
+  rating: text("rating").$type<number>(),
+  ratingCount: text("rating_count").$type<number>(),
+  notes: jsonb("notes"),
+  pros: jsonb("pros"),
+  cons: jsonb("cons"),
+  season: jsonb("season"),
+  gender: jsonb("gender"),
+  longevity: jsonb("longevity"),
+  sillage: jsonb("sillage"),
+  timeOfDay: jsonb("time_of_day"),
+  valueForMoney: jsonb("value_for_money"),
+  mainImageUrl: text("main_image_url"),
+  similarPerfumes: jsonb("similar_perfumes"),
+  recommendedPerfumes: jsonb("recommended_perfumes"),
+  remindsMePerfumes: jsonb("reminds_me_perfumes"),
+  review: jsonb("review"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type Perfume = InferSelectModel<typeof perfume>;

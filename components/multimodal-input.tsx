@@ -360,7 +360,7 @@ function PureMultimodalInput({
             maxHeight={200}
             minHeight={44}
             onChange={handleInput}
-            placeholder="Send a message..."
+            placeholder="Zapytaj o perfumy, nuty zapachowe, rekomendacje..."
             ref={textareaRef}
             rows={1}
             value={input}

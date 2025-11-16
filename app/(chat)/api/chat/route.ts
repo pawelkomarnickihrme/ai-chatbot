@@ -4,7 +4,6 @@ import {
   createUIMessageStream,
   JsonToSseTransformStream,
   smoothStream,
-  stepCountIs,
   streamText,
 } from "ai";
 import { unstable_cache as cache } from "next/cache";
@@ -19,13 +18,9 @@ import { getUsage } from "tokenlens/helpers";
 import { auth, type UserType } from "@/app/(auth)/auth";
 import type { VisibilityType } from "@/components/visibility-selector";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
+import { generateEmbedding } from "@/lib/ai/embeddings";
 import type { ChatModel } from "@/lib/ai/models";
-import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
 import { myProvider } from "@/lib/ai/providers";
-import { createDocument } from "@/lib/ai/tools/create-document";
-import { getWeather } from "@/lib/ai/tools/get-weather";
-import { requestSuggestions } from "@/lib/ai/tools/request-suggestions";
-import { updateDocument } from "@/lib/ai/tools/update-document";
 import { isProductionEnvironment } from "@/lib/constants";
 import {
   createStreamId,
@@ -35,13 +30,14 @@ import {
   getMessagesByChatId,
   saveChat,
   saveMessages,
+  searchPerfumesByEmbedding,
   updateChatLastContextById,
 } from "@/lib/db/queries";
 import type { DBMessage } from "@/lib/db/schema";
 import { ChatSDKError } from "@/lib/errors";
 import type { ChatMessage } from "@/lib/types";
 import type { AppUsage } from "@/lib/usage";
-import { convertToUIMessages, generateUUID } from "@/lib/utils";
+import { convertToUIMessages, generateUUID, getTextFromMessage } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
 
@@ -150,15 +146,6 @@ export async function POST(request: Request) {
 
     const uiMessages = [...convertToUIMessages(messagesFromDb), message];
 
-    const { longitude, latitude, city, country } = geolocation(request);
-
-    const requestHints: RequestHints = {
-      longitude,
-      latitude,
-      city,
-      country,
-    };
-
     await saveMessages({
       messages: [
         {
@@ -177,77 +164,128 @@ export async function POST(request: Request) {
 
     let finalMergedUsage: AppUsage | undefined;
 
+    // Wyciągnij tekst z wiadomości użytkownika
+    const userMessageText = getTextFromMessage(message);
+
     const stream = createUIMessageStream({
-      execute: ({ writer: dataStream }) => {
-        const result = streamText({
-          model: myProvider.languageModel(selectedChatModel),
-          system: systemPrompt({ selectedChatModel, requestHints }),
-          messages: convertToModelMessages(uiMessages),
-          stopWhen: stepCountIs(5),
-          experimental_activeTools:
-            selectedChatModel === "chat-model-reasoning"
-              ? []
-              : [
-                  "getWeather",
-                  "createDocument",
-                  "updateDocument",
-                  "requestSuggestions",
-                ],
-          experimental_transform: smoothStream({ chunking: "word" }),
-          tools: {
-            getWeather,
-            createDocument: createDocument({ session, dataStream }),
-            updateDocument: updateDocument({ session, dataStream }),
-            requestSuggestions: requestSuggestions({
-              session,
-              dataStream,
-            }),
-          },
-          experimental_telemetry: {
-            isEnabled: isProductionEnvironment,
-            functionId: "stream-text",
-          },
-          onFinish: async ({ usage }) => {
-            try {
-              const providers = await getTokenlensCatalog();
-              const modelId =
-                myProvider.languageModel(selectedChatModel).modelId;
-              if (!modelId) {
+      execute: async ({ writer: dataStream }) => {
+        try {
+          // Generuj embedding dla zapytania użytkownika
+          const queryEmbedding = await generateEmbedding(userMessageText);
+
+          // Wyszukaj perfumy używając vector search
+          const perfumes = await searchPerfumesByEmbedding({
+            queryEmbedding,
+            limit: 5,
+          });
+
+          // Przygotuj kontekst z znalezionymi perfumami
+          const perfumesContext = perfumes.length > 0
+            ? perfumes
+                .map(
+                  (p) =>
+                    `**${p.perfume_name}**${p.brand ? ` (${p.brand})` : ""}\n` +
+                    `${p.description ? `Opis: ${p.description}\n` : ""}` +
+                    `${p.rating ? `⭐ Ocena: ${p.rating}/5${p.rating_count ? ` (${p.rating_count} opinii)` : ""}\n` : ""}` +
+                    `${p.notes ? `Nuty zapachowe: ${Array.isArray(p.notes) ? p.notes.join(", ") : JSON.stringify(p.notes)}\n` : ""}` +
+                    `${p.season ? `Sezon: ${Array.isArray(p.season) ? p.season.join(", ") : JSON.stringify(p.season)}\n` : ""}` +
+                    `${p.gender ? `Dla: ${Array.isArray(p.gender) ? p.gender.join(", ") : JSON.stringify(p.gender)}\n` : ""}` +
+                    `${p.longevity ? `Trwałość: ${JSON.stringify(p.longevity)}\n` : ""}` +
+                    `${p.sillage ? `Sillage: ${JSON.stringify(p.sillage)}\n` : ""}` +
+                    `${p.timeOfDay ? `Pora dnia: ${Array.isArray(p.timeOfDay) ? p.timeOfDay.join(", ") : JSON.stringify(p.timeOfDay)}\n` : ""}` +
+                    `${p.valueForMoney ? `Stosunek jakości do ceny: ${JSON.stringify(p.valueForMoney)}\n` : ""}` +
+                    `${p.pros ? `Zalety: ${Array.isArray(p.pros) ? p.pros.join(", ") : JSON.stringify(p.pros)}\n` : ""}` +
+                    `${p.cons ? `Wady: ${Array.isArray(p.cons) ? p.cons.join(", ") : JSON.stringify(p.cons)}\n` : ""}` +
+                    `${p.similarPerfumes ? `Podobne perfumy: ${Array.isArray(p.similarPerfumes) ? p.similarPerfumes.join(", ") : JSON.stringify(p.similarPerfumes)}\n` : ""}`
+                )
+                .join("\n\n---\n\n")
+            : "";
+
+          // Generuj odpowiedź używając AI modelu do formatowania
+          const systemPrompt = `Jesteś ekspertem w dziedzinie perfum - profesjonalnym asystentem perfumowym z głęboką wiedzą o zapachach, nutach zapachowych, kompozycjach i trendach w świecie perfum.
+
+Twoje zadania:
+1. Pomagasz użytkownikom znaleźć idealne perfumy na podstawie ich preferencji, okazji, budżetu i stylu życia
+2. Wyjaśniasz charakterystykę zapachów, nuty zapachowe i kompozycje
+3. Rekomendujesz perfumy na podstawie podobieństwa, okazji, sezonu i innych kryteriów
+4. Porównujesz perfumy i pomagasz w wyborze
+5. Udzielasz profesjonalnych porad dotyczących aplikacji, przechowywania i pielęgnacji perfum
+
+Styl komunikacji:
+- Bądź profesjonalny, ale przyjazny i przystępny
+- Używaj terminologii perfumeryjnej, ale wyjaśniaj trudne pojęcia
+- Bądź entuzjastyczny, ale obiektywny
+- Zawsze odpowiadaj po polsku
+- Formatuj odpowiedzi w sposób czytelny, używając akapitów i list gdy to pomocne
+
+${perfumes.length > 0 ? `Znalezione perfumy w bazie danych:\n\n${perfumesContext}\n\nUżyj tych informacji, aby udzielić szczegółowej i pomocnej odpowiedzi. Jeśli użytkownik pyta o konkretne perfumy, skup się na tych znalezionych w bazie. Jeśli pyta ogólnie, możesz użyć znalezionych perfum jako przykładów lub punktu wyjścia.` : "Nie znaleziono perfum pasujących do zapytania w bazie danych. Odpowiedz pomocnie, sugerując inne podejście do wyszukiwania lub zadaj pytania pomocnicze, aby lepiej zrozumieć potrzeby użytkownika."}
+
+Pamiętaj: Zawsze odpowiadaj po polsku i bądź pomocny, profesjonalny i entuzjastyczny w temacie perfum.`;
+
+          const result = streamText({
+            model: myProvider.languageModel(selectedChatModel),
+            system: systemPrompt,
+            messages: [
+              {
+                role: "user",
+                content: userMessageText,
+              },
+            ],
+            experimental_transform: smoothStream({ chunking: "word" }),
+            experimental_telemetry: {
+              isEnabled: isProductionEnvironment,
+              functionId: "stream-text",
+            },
+            onFinish: async ({ usage }) => {
+              try {
+                const providers = await getTokenlensCatalog();
+                const modelId =
+                  myProvider.languageModel(selectedChatModel).modelId;
+                if (!modelId) {
+                  finalMergedUsage = usage;
+                  dataStream.write({
+                    type: "data-usage",
+                    data: finalMergedUsage,
+                  });
+                  return;
+                }
+
+                if (!providers) {
+                  finalMergedUsage = usage;
+                  dataStream.write({
+                    type: "data-usage",
+                    data: finalMergedUsage,
+                  });
+                  return;
+                }
+
+                const summary = getUsage({ modelId, usage, providers });
+                finalMergedUsage = { ...usage, ...summary, modelId } as AppUsage;
+                dataStream.write({ type: "data-usage", data: finalMergedUsage });
+              } catch (err) {
+                console.warn("TokenLens enrichment failed", err);
                 finalMergedUsage = usage;
-                dataStream.write({
-                  type: "data-usage",
-                  data: finalMergedUsage,
-                });
-                return;
+                dataStream.write({ type: "data-usage", data: finalMergedUsage });
               }
+            },
+          });
 
-              if (!providers) {
-                finalMergedUsage = usage;
-                dataStream.write({
-                  type: "data-usage",
-                  data: finalMergedUsage,
-                });
-                return;
-              }
+          result.consumeStream();
 
-              const summary = getUsage({ modelId, usage, providers });
-              finalMergedUsage = { ...usage, ...summary, modelId } as AppUsage;
-              dataStream.write({ type: "data-usage", data: finalMergedUsage });
-            } catch (err) {
-              console.warn("TokenLens enrichment failed", err);
-              finalMergedUsage = usage;
-              dataStream.write({ type: "data-usage", data: finalMergedUsage });
-            }
-          },
-        });
-
-        result.consumeStream();
-
-        dataStream.merge(
-          result.toUIMessageStream({
-            sendReasoning: true,
-          })
-        );
+          dataStream.merge(
+            result.toUIMessageStream({
+              sendReasoning: false,
+            })
+          );
+        } catch (error) {
+          console.error("Error in perfume search:", error);
+          dataStream.write({
+            type: "text-delta",
+            delta: "Przepraszam, wystąpił błąd podczas wyszukiwania perfum. Spróbuj ponownie.",
+            id: generateUUID(),
+          });
+          dataStream.write({ type: "finish" });
+        }
       },
       generateId: generateUUID,
       onFinish: async ({ messages }) => {
@@ -294,16 +332,6 @@ export async function POST(request: Request) {
 
     if (error instanceof ChatSDKError) {
       return error.toResponse();
-    }
-
-    // Check for Vercel AI Gateway credit card error
-    if (
-      error instanceof Error &&
-      error.message?.includes(
-        "AI Gateway requires a valid credit card on file to service requests"
-      )
-    ) {
-      return new ChatSDKError("bad_request:activate_gateway").toResponse();
     }
 
     console.error("Unhandled error in chat API:", error, { vercelId });
